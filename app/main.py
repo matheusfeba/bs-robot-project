@@ -1,5 +1,6 @@
-from __future__ import annotations
-
+import logging
+import os
+import time
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -9,18 +10,48 @@ from PIL import Image
 from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
 
 
-BASE_URL = "https://bradescoseguros.neowrk.com"
-BOOKING_URL = "https://bradescoseguros.neowrk.com/desk4me/desk/booking"
+BASE_URL = os.getenv("BS_ROBOT_BASE_URL", "https://bradescoseguros.neowrk.com")
+BOOKING_URL = os.getenv("BS_ROBOT_BOOKING_URL", "https://bradescoseguros.neowrk.com/desk4me/desk/booking")
 
-EMAIL = "isabelle.ferreira@bradescoseguros.com.br"
-SENHA = "Pass2025!"
+EMAIL = os.getenv("BS_ROBOT_EMAIL", "isabelle.ferreira@bradescoseguros.com.br")
+SENHA = os.getenv("BS_ROBOT_PASS", "Pass2025!")
 
-POSICAO_DESEJADA = "P-06-156"
+POSICAO_DESEJADA = os.getenv("BS_ROBOT_POSICAO", "P-06-156")
+
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+setup_logging()
+logger = logging.getLogger(__name__)
+
+
+def find_and_click(page, selectors, timeout=8000, retries=3, force=False):
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        for selector in selectors:
+            try:
+                elem = page.locator(selector).first
+                elem.wait_for(state="visible", timeout=timeout)
+                elem.click(timeout=timeout, force=force)
+                return True
+            except Exception as exc:
+                last_exc = exc
+        if attempt < retries:
+            sleep = 0.5 * attempt
+            logger.debug("find_and_click retry %s after %s seconds", attempt, sleep)
+            time.sleep(sleep)
+    raise RuntimeError(f"Não consegui clicar em nenhum seletor {selectors}. Erro: {last_exc}")
 
 # Arquivo do template (imagem referência)
 TEMPLATE_PATH = Path(__file__).parent / "images" / "posição.png"
 if not TEMPLATE_PATH.exists():
-    alt = Path(__file__).parent / "images" / "posição.png"
+    alt = Path(__file__).parent / "images" / "posicao.png"
     if alt.exists():
         TEMPLATE_PATH = alt
     else:
@@ -48,19 +79,13 @@ def run():
         page.goto(BASE_URL, wait_until="domcontentloaded")
 
         # 2) Clica em "Entrar"
-        try:
-            page.get_by_role("button", name="Entrar").click(timeout=8000)
-        except Exception:
-            page.get_by_text("Entrar", exact=True).click(timeout=8000)
+        find_and_click(page, ["button:has-text('Entrar')", "text=Entrar"], timeout=8000)
 
         # 3) Login
         page.get_by_placeholder("Email").fill(EMAIL, timeout=8000)
         page.get_by_placeholder("Senha").fill(SENHA, timeout=8000)
 
-        try:
-            page.locator("form").get_by_role("button", name="Entrar").click(timeout=8000)
-        except Exception:
-            page.get_by_role("button", name="Entrar").first.click(timeout=8000)
+        find_and_click(page, ["form button:has-text('Entrar')", "button:has-text('Entrar')"], timeout=8000)
 
         page.wait_for_load_state("networkidle", timeout=20000)
 
@@ -82,7 +107,7 @@ def run():
             max_tentativas=None,  # tenta todos os pontos verdes dentro da ROI
         )
 
-        print("Fluxo concluído (reserva acionada na posição desejada).")
+        logger.info("Fluxo concluído (reserva acionada na posição desejada).")
         input("Pressione ENTER no terminal para encerrar o navegador...")
 
         context.close()
@@ -134,7 +159,7 @@ def selecionar_data_mais_7_dias(page):
 
     clicar_ok_calendario(page)
 
-    print(f"Data confirmada: {alvo.strftime('%d/%m/%Y')}")
+    logger.info("Data confirmada: %s", alvo.strftime('%d/%m/%Y'))
 
 
 def abrir_calendario(page):
@@ -167,17 +192,11 @@ def clicar_ok_calendario(page):
         "span.p-button-label:has-text('OK')",
         "div.md-dialog-content button:has-text('OK')",
     ]
-
-    for sel in candidatos:
-        try:
-            btn = page.locator(sel).first
-            btn.wait_for(state="visible", timeout=6000)
-            btn.click(timeout=6000)
-            return
-        except Exception:
-            pass
-
-    raise RuntimeError("Botão OK do calendário não encontrado.")
+    try:
+        find_and_click(page, candidatos, timeout=6000)
+    except RuntimeError as exc:
+        logger.error("clicar_ok_calendario falhou: %s", exc)
+        raise
 
 
 # -------------------------
@@ -372,13 +391,21 @@ def procurar_e_reservar_por_template_numpy(
     canvas_png = canvas.screenshot()
 
     # 1) ROI pelo template (sem OpenCV)
-    roi = encontrar_roi_por_template_numpy(
-        canvas_png_bytes=canvas_png,
-        template_path=template_path,
-        scale=scale,
-        roi_padding_px=roi_padding_px,
-    )
-    print(f"ROI encontrada pelo template: {roi}")
+    for attempt in range(1, 4):
+        try:
+            roi = encontrar_roi_por_template_numpy(
+                canvas_png_bytes=canvas_png,
+                template_path=template_path,
+                scale=scale,
+                roi_padding_px=roi_padding_px,
+            )
+            break
+        except Exception as exc:
+            logger.warning("Tentativa %s de encontrar ROI falhou: %s", attempt, exc)
+            if attempt == 3:
+                raise
+            time.sleep(0.5 * attempt)
+    logger.info("ROI encontrada pelo template: %s", roi)
 
     # 2) dentro da ROI, detecta pontos verdes
     pontos = _coletar_pontos_verdes(canvas_png, step=7, roi=roi)
