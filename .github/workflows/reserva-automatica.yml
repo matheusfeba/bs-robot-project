@@ -1,0 +1,67 @@
+name: Reserva Automática — BS Robot
+
+on:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Executa toda segunda-feira às 00:00 BRT (03:00 UTC) → reserva para a
+  # segunda-feira da semana seguinte (+7 dias)
+  # Executa toda terça-feira às 00:00 BRT (03:00 UTC) → reserva para a
+  # terça-feira da semana seguinte (+7 dias)
+  # ──────────────────────────────────────────────────────────────────────────
+  schedule:
+    - cron: '0 3 * * 1'   # segunda-feira 00:00 BRT
+    - cron: '0 3 * * 2'   # terça-feira  00:00 BRT
+
+  # Permite disparar manualmente pela aba "Actions" do repositório
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Data alvo (DD/MM ou DD/MM/YYYY). Deixe vazio para usar hoje +7 dias.'
+        required: false
+        default: ''
+      posicao:
+        description: 'Posição desejada (ex: P-06-156)'
+        required: false
+        default: 'P-06-156'
+
+jobs:
+  reservar:
+    name: Reservar mesa ${{ github.event.inputs.posicao || 'P-06-156' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar Chromium (Playwright)
+        run: playwright install --with-deps chromium
+
+      - name: Executar robô de reserva
+        env:
+          BS_ROBOT_EMAIL: ${{ secrets.BS_ROBOT_EMAIL }}
+          BS_ROBOT_PASS: ${{ secrets.BS_ROBOT_PASS }}
+          BS_ROBOT_POSICAO: ${{ github.event.inputs.posicao || 'P-06-156' }}
+          BS_ROBOT_TARGET_DATE: ${{ github.event.inputs.target_date || '' }}
+          BS_ROBOT_HEADLESS: 'true'
+          # CI=true já é definido automaticamente pelo GitHub Actions
+        run: python app/main.py
+
+      - name: Upload screenshots de debug
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_id }}
+          path: |
+            app/images/debug_*.png
+            app/images/robot.log
+          retention-days: 7
+          if-no-files-found: ignore
