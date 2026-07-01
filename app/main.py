@@ -696,14 +696,6 @@ def _listar_features_ol_js(page) -> list[str]:
 
 # ─────────────────────────── CANVAS: CARD INFO + MODAL ───────────────────────────
 
-def _esperar_info_card(page, timeout=3000):
-    """Wait for the OpenLayers feature-info card (#feature-informations) to become visible."""
-    card = page.locator("#feature-informations").first
-    try:
-        card.wait_for(state="visible", timeout=timeout)
-        return card
-    except PWTimeout:
-        return None
 
 
 def _ler_posicao_no_card(card) -> str | None:
@@ -827,9 +819,8 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
         if tentativas > 800:
             break
 
-        # Dismiss any open card before clicking a new position
+        # Dismiss any open element before clicking new position (no wait — headless is instant)
         _fechar_card(page)
-        page.wait_for_timeout(100)
 
         try:
             canvas.click(position={"x": x, "y": y}, force=True, timeout=5000)
@@ -837,12 +828,19 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
             logger.debug("Click falhou (%d,%d): %s", x, y, e)
             continue
 
-        page.wait_for_timeout(100)
+        # ── Single combined wait: card OR modal, whichever appears first ────────
+        # Playwright uses MutationObserver — returns as soon as DOM changes, not after timeout.
+        # 100ms budget is safe; OL+Vue DOM updates happen in <50ms in headless Chrome.
+        try:
+            page.locator(
+                "#feature-informations, div.md-dialog-container, md-dialog"
+            ).first.wait_for(state="visible", timeout=100)
+        except PWTimeout:
+            continue  # Silent position — no desk here
 
-        # ── Check for OL feature-info card (#feature-informations) ─────────────
-        card = _esperar_info_card(page, timeout=350)
-        if card:
-            # On the first card appearance, save its HTML for debugging
+        # ── Card path (#feature-informations = occupied desk info overlay) ──────
+        card = page.locator("#feature-informations").first
+        if card.is_visible(timeout=0):
             if not card_logged:
                 card_logged = True
                 try:
@@ -863,13 +861,12 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
                         page.wait_for_timeout(1500)
                         _debug_screenshot(page, "pos_reservar_card")
 
-                        # Handle optional confirmation dialog
                         try:
                             modal = _esperar_modal_reserva(page, timeout=8000)
                             _clicar_reservar(modal)
                             logger.info("Confirmou reserva no modal")
                         except PWTimeout:
-                            pass  # Reservation confirmed directly from card
+                            pass
 
                         logger.info("✅ Posição %s reservada!", posicao_desejada)
                         return True
@@ -882,7 +879,6 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
                 page.wait_for_timeout(200)
                 continue
 
-            # Card showed but no P-XX-XXX found — log first occurrence
             if not card_logged or tentativas <= 3:
                 try:
                     card_text = card.inner_text(timeout=1500)
@@ -893,73 +889,76 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
             page.wait_for_timeout(150)
             continue
 
-        # ── Fallback: check for md-dialog (some desks may open dialog directly) ─
+        # ── Modal path (md-dialog = available desk reservation dialog) ──────────
+        modal = page.locator("div.md-dialog-container, md-dialog").first
+        if not modal.is_visible(timeout=0):
+            continue
+
         try:
-            modal = _esperar_modal_reserva(page, timeout=350)
             posicao = _ler_posicao_no_modal(modal)
-            logger.info("[%d] (%d,%d) → modal: %s", tentativas, x, y, posicao)
-            if posicao == posicao_desejada:
-                # Log full modal HTML and screenshot before clicking Reservar
-                try:
-                    html = modal.inner_html(timeout=2000)
-                    logger.info("Modal HTML (antes de Reservar): %s", html[:1200])
-                except Exception:
-                    pass
-                _debug_screenshot(page, "modal_antes_reservar")
-
-                _clicar_reservar(modal)
-                logger.info("Clicou em Reservar no modal")
-
-                # Wait for the modal to close (server processes the booking request)
-                try:
-                    modal.wait_for(state="hidden", timeout=15000)
-                    logger.info("Modal fechou após Reservar")
-                except PWTimeout:
-                    logger.warning("Modal ainda visível após 15s — pode haver erro")
-                    _debug_screenshot(page, "modal_nao_fechou")
-
-                page.wait_for_timeout(2000)
-                _debug_screenshot(page, "pos_reservar_modal")
-
-                # Check for any follow-up confirmation step
-                for conf_sel in [
-                    "button:has-text('Confirmar')",
-                    "button:has-text('Sim')",
-                    "button:has-text('OK')",
-                    "button:has-text('Concluir')",
-                    "button:has-text('CONFIRMAR')",
-                ]:
-                    try:
-                        btn = page.locator(conf_sel).first
-                        if btn.is_visible(timeout=2000):
-                            btn.click(timeout=5000)
-                            logger.info("Confirmação adicional clicada: %s", conf_sel)
-                            page.wait_for_timeout(3000)
-                            _debug_screenshot(page, "pos_confirmar_extra")
-                            break
-                    except Exception:
-                        pass
-
-                # Check for success or error text on page
-                try:
-                    body = page.inner_text("body", timeout=3000)
-                    for word in ["sucesso", "confirmad", "reservad", "erro", "indisponível", "ocupad"]:
-                        if word.lower() in body.lower():
-                            logger.info("Texto pós-reserva contém: '%s'", word)
-                except Exception:
-                    pass
-
-                _debug_screenshot(page, "08_final_estado")
-                logger.info("✅ Posição %s — fluxo de reserva concluído!", posicao_desejada)
-                return True
-            try:
-                modal.locator("button:has-text('Cancelar')").first.click(timeout=4000)
-                modal.wait_for(state="hidden", timeout=4000)
-            except Exception:
-                page.keyboard.press("Escape")
+        except Exception:
+            page.keyboard.press("Escape")
             page.wait_for_timeout(200)
-        except (PWTimeout, RuntimeError):
-            pass  # Nothing appeared at this position
+            continue
+
+        logger.info("[%d] (%d,%d) → modal: %s", tentativas, x, y, posicao)
+        if posicao == posicao_desejada:
+            try:
+                html = modal.inner_html(timeout=2000)
+                logger.info("Modal HTML (antes de Reservar): %s", html[:1200])
+            except Exception:
+                pass
+            _debug_screenshot(page, "modal_antes_reservar")
+
+            _clicar_reservar(modal)
+            logger.info("Clicou em Reservar no modal")
+
+            try:
+                modal.wait_for(state="hidden", timeout=15000)
+                logger.info("Modal fechou após Reservar")
+            except PWTimeout:
+                logger.warning("Modal ainda visível após 15s — pode haver erro")
+                _debug_screenshot(page, "modal_nao_fechou")
+
+            page.wait_for_timeout(2000)
+            _debug_screenshot(page, "pos_reservar_modal")
+
+            for conf_sel in [
+                "button:has-text('Confirmar')",
+                "button:has-text('Sim')",
+                "button:has-text('OK')",
+                "button:has-text('Concluir')",
+                "button:has-text('CONFIRMAR')",
+            ]:
+                try:
+                    btn = page.locator(conf_sel).first
+                    if btn.is_visible(timeout=2000):
+                        btn.click(timeout=5000)
+                        logger.info("Confirmação adicional clicada: %s", conf_sel)
+                        page.wait_for_timeout(3000)
+                        _debug_screenshot(page, "pos_confirmar_extra")
+                        break
+                except Exception:
+                    pass
+
+            try:
+                body = page.inner_text("body", timeout=3000)
+                for word in ["sucesso", "confirmad", "reservad", "erro", "indisponível", "ocupad"]:
+                    if word.lower() in body.lower():
+                        logger.info("Texto pós-reserva contém: '%s'", word)
+            except Exception:
+                pass
+
+            _debug_screenshot(page, "08_final_estado")
+            logger.info("✅ Posição %s — fluxo de reserva concluído!", posicao_desejada)
+            return True
+
+        try:
+            modal.locator("button:has-text('Cancelar')").first.click(timeout=4000)
+            modal.wait_for(state="hidden", timeout=4000)
+        except Exception:
+            page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
 
     raise RuntimeError(
         f"Posição '{posicao_desejada}' não encontrada após {tentativas} tentativas."
