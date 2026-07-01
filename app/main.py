@@ -933,10 +933,18 @@ def run():
 
     with sync_playwright() as p:
         headless = os.getenv("BS_ROBOT_HEADLESS", "").lower() in ("true", "1") or bool(os.getenv("CI"))
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
         context = browser.new_context(
             locale="pt-BR",
             viewport={"width": 1440, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
         )
         page = context.new_page()
 
@@ -947,6 +955,20 @@ def run():
             logger.info("Navegando para %s", BOOKING_URL)
             page.goto(BOOKING_URL, wait_until="domcontentloaded")
             page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_timeout(2000)
+
+            # The desk booking module may show an "Entrar" gate even after login.
+            # Click it to enter the module, then wait for the booking UI to render.
+            try:
+                entrar = page.locator("button.md-raised:has-text('Entrar'), button.md-primary:has-text('Entrar')").first
+                if entrar.is_visible(timeout=3000):
+                    logger.info("Botão 'Entrar' do módulo desk — clicando")
+                    entrar.click(timeout=5000)
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_timeout(2000)
+            except PWTimeout:
+                pass
+
             _debug_screenshot(page, "03_booking")
 
             selecionar_data(page, TARGET_DATE)
