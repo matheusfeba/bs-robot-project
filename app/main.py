@@ -97,6 +97,26 @@ def find_and_click(page, selectors, timeout=8000, retries=3, force=False):
 
 # ─────────────────────────── LOGIN ───────────────────────────
 
+def _dispensar_cookie_consent(page):
+    """Dismiss cookie consent banners (cookieconsent library or similar)."""
+    for sel in [
+        "button.cc-dismiss",
+        "button:has-text('Got it!')",
+        "button:has-text('Accept')",
+        "button:has-text('Aceitar')",
+        "button:has-text('OK')",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1000):
+                btn.click(timeout=3000)
+                logger.info("Cookie consent dispensado: %s", sel)
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            continue
+
+
 def fazer_login(page):
     logger.info("Acessando %s", BASE_URL)
     page.goto(BASE_URL, wait_until="domcontentloaded")
@@ -110,29 +130,44 @@ def fazer_login(page):
         logger.info("Landing page detectada — clicando em Entrar")
         page.locator("a:has-text('Entrar'), button:has-text('Entrar')").first.click(timeout=8000)
         page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
+
+    # Dismiss cookie consent banner before interacting with login form
+    _dispensar_cookie_consent(page)
 
     logger.info("Preenchendo credenciais: %s", EMAIL)
     page.get_by_placeholder("Email").fill(EMAIL, timeout=10000)
-    page.get_by_placeholder("Senha").fill(SENHA, timeout=8000)
+    # Password placeholder may be "Senha" or "Password" depending on locale
+    for ph in ["Senha", "Password", "senha", "password"]:
+        try:
+            page.get_by_placeholder(ph).fill(SENHA, timeout=3000)
+            break
+        except Exception:
+            continue
 
     _debug_screenshot(page, "01_credenciais")
 
-    page.locator("button:has-text('Entrar')").first.click(timeout=8000)
+    # force=True ensures cookie banner overlay doesn't block the click
+    page.locator("button:has-text('Entrar'), button[type='submit']").first.click(
+        timeout=8000, force=True
+    )
 
-    # Step 1: wait for OAuth redirect away from the identity provider
+    # Step 1: wait for OAuth redirect back to neowrk.com (away from identity provider)
     try:
         page.wait_for_url(
-            lambda url: "Account/Login" not in url and "login" not in url.lower(),
-            timeout=30000,
+            lambda url: "neowrk.com" in url,
+            timeout=35000,
         )
         logger.info("OAuth redirect detectado: %s", page.url[:80])
     except PWTimeout:
-        logger.warning("Timeout esperando redirect OAuth")
+        logger.warning("Timeout esperando redirect OAuth — URL: %s", page.url[:80])
 
     # Step 2: wait for the /signin SPA callback to finish and redirect to the main app
     try:
-        page.wait_for_url(lambda url: "/signin" not in url, timeout=30000)
+        page.wait_for_url(
+            lambda url: "neowrk.com" in url and "/signin" not in url,
+            timeout=30000,
+        )
         logger.info("App carregado: %s", page.url)
     except PWTimeout:
         logger.warning("Timeout esperando redirect do /signin — continuando")
@@ -143,6 +178,12 @@ def fazer_login(page):
 
     logger.info("Login concluído. URL: %s", page.url)
     _debug_screenshot(page, "02_pos_login")
+
+    # Fail fast if login clearly didn't work
+    if "neowrk.com" not in page.url:
+        raise RuntimeError(
+            f"Login falhou — verifique BS_ROBOT_EMAIL e BS_ROBOT_PASS. URL atual: {page.url[:100]}"
+        )
 
 
 def fechar_popups(page):
@@ -957,8 +998,14 @@ def run():
             page.wait_for_load_state("networkidle", timeout=20000)
             page.wait_for_timeout(2000)
 
+            logger.info("URL pós-navegação booking: %s", page.url)
+            if "neowrk.com" not in page.url:
+                raise RuntimeError(
+                    f"Página de booking redirecionou para fora do neowrk.com: {page.url[:100]}"
+                )
+
             # The desk booking module may show an "Entrar" gate even after login.
-            # Click it to enter the module, then wait for the booking UI to render.
+            # Only trigger on neowrk.com (guards against freeroom.io redirect case).
             try:
                 entrar = page.locator("button.md-raised:has-text('Entrar'), button.md-primary:has-text('Entrar')").first
                 if entrar.is_visible(timeout=3000):
