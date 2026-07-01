@@ -11,9 +11,14 @@ from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
 BASE_URL = os.getenv("BS_ROBOT_BASE_URL", "https://bradescoseguros.neowrk.com")
 BOOKING_URL = os.getenv("BS_ROBOT_BOOKING_URL", "https://bradescoseguros.neowrk.com/desk4me/desk/booking")
 
-EMAIL = os.getenv("BS_ROBOT_EMAIL", "isabelle.ferreira@bradescoseguros.com.br")
-SENHA = os.getenv("BS_ROBOT_PASS", "Pass2025!")
+EMAIL = os.getenv("BS_ROBOT_EMAIL", "")
+SENHA = os.getenv("BS_ROBOT_PASS", "")
 POSICAO_DESEJADA = os.getenv("BS_ROBOT_POSICAO", "P-06-156")
+
+if not EMAIL or not SENHA:
+    raise SystemExit(
+        "Erro: BS_ROBOT_EMAIL e BS_ROBOT_PASS devem ser definidos via variáveis de ambiente."
+    )
 
 # Data alvo: DD/MM ou DD/MM/YYYY. Se não informada, usa hoje +7 dias.
 TARGET_DATE_STR = os.getenv("BS_ROBOT_TARGET_DATE", "")
@@ -29,6 +34,7 @@ MESES_PT = {
 
 def setup_logging() -> None:
     log_file = Path(__file__).parent / "images" / "robot.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
         handlers.append(logging.FileHandler(str(log_file), mode="w", encoding="utf-8"))
@@ -673,19 +679,12 @@ def _ler_posicao_no_card(card) -> str | None:
 
 def _esperar_modal_reserva(page, timeout=8000):
     """Wait for a reservation confirmation dialog that contains a 'Reservar' button."""
-    for sel in [
-        "div.md-dialog-container:has(button:has-text('Reservar'))",
-        "md-dialog:has(button:has-text('Reservar'))",
-        "div.md-dialog-container",
-        "md-dialog",
-    ]:
-        try:
-            modal = page.locator(sel).first
-            modal.wait_for(state="visible", timeout=timeout)
-            return modal
-        except PWTimeout:
-            continue
-    raise PWTimeout("Modal de reserva não encontrado")
+    try:
+        modal = page.locator("div.md-dialog-container, md-dialog").first
+        modal.wait_for(state="visible", timeout=timeout)
+        return modal
+    except PWTimeout:
+        raise PWTimeout("Modal de reserva não encontrado")
 
 
 def _ler_posicao_no_modal(modal) -> str:
@@ -719,7 +718,7 @@ def _fechar_card(page):
         pass
     try:
         btn = page.locator("#feature-informations button[class*='close'], #feature-informations button[aria-label*='close' i], #feature-informations button:has(i:text('close'))").first
-        if btn.is_visible(timeout=500):
+        if btn.is_visible(timeout=0):
             btn.click(force=True)
     except Exception:
         pass
@@ -760,14 +759,18 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
         else:
             logger.warning("Nenhuma feature encontrada via JS.")
 
-        # ── Strategy 2: Grid scan over the desk area ───────────────────────────
-        # P-06-156 is in the UPPER section of the floor map.
-        # The map may load at slightly different vertical offsets each run:
-        #   run 1: y≈265  |  run 3: y≈199
-        # Sorted from y=199 (most recent known location), expanding outward.
-        logger.info("Iniciando varredura de grade sobre a área de mesas (topo primeiro)...")
-        y_ordered = sorted(range(111, 545, 22), key=lambda y: abs(y - 199))
-        candidates = [(x, y) for y in y_ordered for x in range(55, 695, 22)]
+        # ── Strategy 2: Top-to-bottom full canvas scan ─────────────────────────
+        # The upper desk section (P-06-156) is always in the upper portion of the
+        # canvas; the main desk grid is always lower. Scanning top-to-bottom
+        # guarantees we reach P-06-156's area before wasting time on the main grid.
+        # The canvas position shifts significantly between sessions so fixed
+        # coordinates are unreliable — full coverage with fast timeouts is safer.
+        candidates = [
+            (x, y)
+            for y in range(11, 545, 15)
+            for x in range(11, 695, 15)
+        ]
+        logger.info("Varredura topo→baixo: %d candidatos (step 15px)", len(candidates))
 
     clicados: set[tuple[int, int]] = set()
     tentativas = 0
@@ -780,7 +783,7 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
         clicados.add(cell)
         tentativas += 1
 
-        if tentativas > 350:
+        if tentativas > 800:
             break
 
         # Dismiss any open card before clicking a new position
@@ -793,10 +796,10 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
             logger.debug("Click falhou (%d,%d): %s", x, y, e)
             continue
 
-        page.wait_for_timeout(350)
+        page.wait_for_timeout(100)
 
         # ── Check for OL feature-info card (#feature-informations) ─────────────
-        card = _esperar_info_card(page, timeout=2000)
+        card = _esperar_info_card(page, timeout=350)
         if card:
             # On the first card appearance, save its HTML for debugging
             if not card_logged:
@@ -851,7 +854,7 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
 
         # ── Fallback: check for md-dialog (some desks may open dialog directly) ─
         try:
-            modal = _esperar_modal_reserva(page, timeout=1200)
+            modal = _esperar_modal_reserva(page, timeout=350)
             posicao = _ler_posicao_no_modal(modal)
             logger.info("[%d] (%d,%d) → modal: %s", tentativas, x, y, posicao)
             if posicao == posicao_desejada:
