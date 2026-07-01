@@ -816,9 +816,6 @@ def procurar_e_reservar(page, posicao_desejada: str, canvas_selector: str = "can
         clicados.add(cell)
         tentativas += 1
 
-        if tentativas > 800:
-            break
-
         # Dismiss any open element before clicking new position (no wait — headless is instant)
         _fechar_card(page)
 
